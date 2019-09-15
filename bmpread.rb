@@ -1,3 +1,4 @@
+# Language: Ruby, Level: Level 3
 # frozen_string_literal: true
 
 # require 'nmatrix'
@@ -31,9 +32,10 @@ class Image
       g = @raw_data.sysread(1).unpack('C')[0]
       r = @raw_data.sysread(1).unpack('C')[0]
       temp = @raw_data.sysread(1).unpack('C')
-      @palette[i - 1] = [r, g, b]
-      puts "#{r},#{g},#{b}"
+      @palette[i - 1] = [b, g, r]
+      #puts "#{r},#{g},#{b}"
     end
+    IO.write("results/palette.txt", @palette.join("\n"))
   end
 
   def describe
@@ -65,14 +67,14 @@ class Image
   def read_to_array
     @raw_data.sysseek(@offset)
     a = Array.new(@height)
-    if @compression.zero?
-      if @bits_per_pixel <= 8
-        a = read_from_palette
-      elsif @bits_per_pixel > 8
-        a = read_from_pixel_array
-        # puts "Location of pointer after reading: #{@raw_data.pos}"
-      end
+
+    if @bits_per_pixel <= 8
+      a = read_from_palette
+    elsif @bits_per_pixel > 8
+      a = read_from_pixel_array
+      # puts "Location of pointer after reading: #{@raw_data.pos}"
     end
+
     a
   end
 
@@ -126,6 +128,10 @@ class Image
         a[@height - i] = row_array
       end
     elsif @bits_per_pixel == 4
+      if @compression != 0
+        a = decompress_RLE4
+        return a
+      end
       (1..@height).each do |i|
         row_array = []
         row_length = ((@width * 4 / 32).floor * 32 + 32) / 8
@@ -147,6 +153,10 @@ class Image
         a[@height - i] = row_array
       end
     elsif @bits_per_pixel == 8
+      if @compression != 0
+        a = decompress_RLE8
+        return a
+      end
       (1..@height).each do |i|
         row_array = Array.new(@width)
         (1..@width).each do |j|
@@ -159,20 +169,126 @@ class Image
     a
   end
 
+  def decompress_RLE4
+    a = Array.new(height)
+    (1..@height).each do |j|
+      i = 0
+      row_array = []
+      len = 0
+      loop do
+
+        first_byte = @raw_data.sysread(1).unpack('C')[0]
+        second_byte = @raw_data.sysread(1).unpack('C')[0]
+        if first_byte != 0
+          pixel_two = second_byte & 15
+          pixel_one = second_byte >> 4
+          rolling_array = [pixel_one, pixel_two]
+          k = 0
+          (1..first_byte).each do
+            row_array.push(@palette[rolling_array[k]])
+            k = k ^ 1
+            len += 1
+          end
+        elsif second_byte > 2
+          sz = (((second_byte + 1)>>1) + 1) & (~1)
+          if second_byte%2 == 1
+            temp = 0
+            (1..sz).each do
+              len += 2
+              two_pixels =  @raw_data.sysread(1).unpack('C')[0]
+              pixel_two = two_pixels & 15
+              pixel_one = two_pixels >> 4
+              if temp<second_byte
+                row_array.push(@palette[pixel_one])
+                temp += 1
+              end
+              if temp<second_byte
+                row_array.push(@palette[pixel_two])
+                temp += 1
+              end
+            end
+          else
+            (1..sz).each do
+              len += 2
+              two_pixels =  @raw_data.sysread(1).unpack('C')[0]
+              pixel_two = two_pixels & 15
+              pixel_one = two_pixels >> 4
+              row_array.push(@palette[pixel_one])
+              row_array.push(@palette[pixel_two])
+            end
+          end
+        elsif second_byte == 1
+          break
+        end
+        break if len >= @width
+
+      end
+      a[@height - j] = row_array
+    end
+    puts @raw_data.pos.to_s
+    return a
+  end
+  def decompress_RLE8
+    a = Array.new(@height)
+    @raw_data.sysseek(@offset)
+    (1..@height).each do |j|
+      i = 0
+      row_array = []
+      len = 0
+      loop do
+
+        first_byte = @raw_data.sysread(1).unpack('C')[0]
+        second_byte = @raw_data.sysread(1).unpack('C')[0]
+        if first_byte != 0
+          (1..first_byte).each do
+            row_array.push(@palette[second_byte])
+            len += 1
+          end
+        elsif second_byte > 2
+          sz = (second_byte+1) & (~1)
+
+          if second_byte %2 ==1
+            (1..(sz-1)).each do
+              len += 1
+              pixel_val =  @raw_data.sysread(1).unpack('C')[0]
+              row_array.push(@palette[pixel_val])
+            end
+            garbage = @raw_data.sysread(1).unpack('C')[0]
+          else
+            (1..sz).each do
+              len += 1
+              pixel_val =  @raw_data.sysread(1).unpack('C')[0]
+              row_array.push(@palette[pixel_val])
+            end
+          end
+        elsif second_byte == 1
+          #break
+        elsif second_byte == 2
+          puts "Error"
+        end
+        break if len >= @width
+
+      end
+      a[@height - j] = row_array
+    end
+    puts @raw_data.pos.to_s
+    return a
+  end
+
   def read_from_pixel_array
     a = Array.new(@height)
     if @bits_per_pixel == 16 # works for rgb555 format, not rgb565
       (1..@height).each do |i|
         row_array = Array.new(@width)
         (1..@width).each do |j|
-          bindata = @raw_data.sysread(2).unpack('n')[0]
-          r = bindata & 0b11111
-          bindata >> 5
-          g = bindata & 0b11111
-          bindata >> 5
-          b = bindata & 0b11111
-          bindata >> 5
-          row_array[j - 1] = [r, g, b]
+          bindata = @raw_data.sysread(2).unpack('S')[0]
+          #bindata = bindata>>1
+          b = (bindata<<3) & 0xf8
+
+          g = (bindata>>2) & 0xf8
+          #bindata = bindata >> 6
+          r = (bindata>>7) & 0xf8
+          row_array[j - 1] = [b, g, r]
         end
         @raw_data.sysread((@width * 3) % 4) # zeros are appended to rows of pixels if the image width is not a multiple of 4, this ignores them.
         a[@height - i] = row_array
@@ -185,7 +301,7 @@ class Image
           b = @raw_data.sysread(1).unpack('C')[0]
           g = @raw_data.sysread(1).unpack('C')[0]
           r = @raw_data.sysread(1).unpack('C')[0]
-          row_array[j - 1] = [r, g, b]
+          row_array[j - 1] = [b, g, r]
         end
         @raw_data.sysread((@width * 3) % 4) # zeros are appended to rows of pixels if the image width is not a multiple of 4, this ignores them.
         a[@height - i] = row_array
@@ -198,7 +314,7 @@ class Image
           g = @raw_data.sysread(1).unpack('C')[0]
           r = @raw_data.sysread(1).unpack('C')[0]
           alpha = @raw_data.sysread(1).unpack('C')[0]
-          row_array[j - 1] = [r, g, b, alpha] # should be changed based on requirement
+          row_array[j - 1] = [alpha, b, g, r] # should be changed based on requirement
         end
         @raw_data.sysread((@width * 3) % 4) # zeros are appended to rows of pixels if the image width is not a multiple of 4, this ignores them.
         a[@height - i] = row_array
@@ -219,19 +335,23 @@ class Image
   attr_reader :height
 end
 
-x = Image.new('testimages/rgb16.bmp') # enter local path
+x = Image.new('testimages/4rle.bmp') # enter local path
 x.describe
 # x.printcolors()
 
 pixels = x.read_to_array
-
+puts pixels.length
+puts pixels[0].length
 # prints the array
+IO.write("results/image.txt", pixels.join("\n"))
 (1..x.height).each do |i|
   puts "#{i}: ****" # Row number
   (1..x.width).each do |j|
     print pixels[i - 1][j - 1] # [R G B]
+    print "  "
   end
   puts '****'
 end
+x.describe
 puts pixels.length
-puts pixels[0].length
+puts pixels[62].length
